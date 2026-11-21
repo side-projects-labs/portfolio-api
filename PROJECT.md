@@ -6,7 +6,6 @@
   "description": "포트폴리오 웹과 관리자 화면이 함께 쓰는 NestJS 백엔드입니다. 프로젝트·프로필·기술 태그를 저장해 공개 조회와 관리자 편집으로 나눠 제공하고, 저장소의 PROJECT.md로 프로젝트 소개를 갱신하는 서비스 API와 OAuth 인증을 갖췄습니다.",
   "image": "https://raw.githubusercontent.com/side-projects-labs/portfolio-api/b33798e299eab071e81770ee76170711a7fff91c/PROJECT.png",
   "stacks": [
-    "NestJS",
     "TypeScript",
     "Prisma",
     "PostgreSQL",
