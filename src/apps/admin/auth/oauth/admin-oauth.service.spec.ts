@@ -1,5 +1,5 @@
 import * as jwt from "jsonwebtoken";
-import { UnauthorizedException } from "@nestjs/common";
+import { Logger, UnauthorizedException } from "@nestjs/common";
 import { PrismaService } from "src/prisma/prisma.service";
 import { AdminOAuthError } from "./admin-oauth";
 import { AdminOAuthService } from "./admin-oauth.service";
@@ -145,6 +145,22 @@ describe("AdminOAuthService", () => {
       expect(prisma.adminUser.findFirst).not.toHaveBeenCalled();
     });
 
+    it("토큰 교환 요청은 form-urlencoded로 전송된다", async () => {
+      google({ email: "admin@test.com", email_verified: true });
+
+      await service.signIn("google", "code-1", "state-1");
+
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const headers = new Headers(init.headers);
+      // fetch는 문자열 body에 Content-Type이 없으면 text/plain으로 보내고, Google은 이를 JSON으로 읽어 거절한다
+      const contentType =
+        headers.get("content-type") ??
+        (init.body instanceof URLSearchParams
+          ? "application/x-www-form-urlencoded;charset=UTF-8"
+          : "text/plain;charset=UTF-8");
+      expect(contentType).toContain("application/x-www-form-urlencoded");
+    });
+
     it("등록되지 않은 이메일은 거절한다", async () => {
       google({ email: "stranger@test.com", email_verified: true });
       prisma.adminUser.findFirst.mockResolvedValue(null);
@@ -239,6 +255,95 @@ describe("AdminOAuthService", () => {
       expect(error).toBeInstanceOf(AdminOAuthError);
       expect(error).toMatchObject({ code: "AUTH_FAILED" });
       expect(String((error as Error).message)).not.toContain("secret");
+    });
+
+    describe("공급자 거절 기록", () => {
+      let warn: jest.SpyInstance;
+
+      beforeEach(() => {
+        warn = jest.spyOn(Logger.prototype, "warn").mockImplementation();
+      });
+
+      afterEach(() => {
+        warn.mockRestore();
+      });
+
+      const logged = () =>
+        warn.mock.calls.map((call) => String(call[0])).join("\n");
+
+      it("토큰 교환이 거절되면 공급자와 상태 및 오류 종류를 남기고 사용자에게는 AUTH_FAILED만 준다", async () => {
+        fetchMock.mockResolvedValueOnce(
+          json(
+            {
+              error: "invalid_grant",
+              error_description: "Bad code leaked-detail",
+            },
+            false,
+          ),
+        );
+
+        await expect(
+          service.signIn("google", "code-1", "state-1"),
+        ).rejects.toMatchObject({ code: "AUTH_FAILED" });
+
+        const text = logged();
+        expect(text).toContain("provider=google");
+        expect(text).toContain("status=400");
+        expect(text).toContain("invalid_grant");
+      });
+
+      it("Google이 객체 형태로 거절해도 상태 문자열만 오류 종류로 남긴다", async () => {
+        fetchMock.mockResolvedValueOnce(
+          json(
+            {
+              error: {
+                code: 400,
+                status: "INVALID_ARGUMENT",
+                message: "Invalid JSON payload code=code-1 leaked-detail",
+              },
+            },
+            false,
+          ),
+        );
+
+        await expect(
+          service.signIn("google", "code-1", "state-1"),
+        ).rejects.toMatchObject({ code: "AUTH_FAILED" });
+
+        expect(logged()).toContain("INVALID_ARGUMENT");
+      });
+
+      it("기록에는 코드, 시크릿, 응답 원문이 들어가지 않는다", async () => {
+        fetchMock.mockResolvedValueOnce(
+          json(
+            {
+              error: "invalid_grant",
+              error_description: "Bad code leaked-detail",
+            },
+            false,
+          ),
+        );
+
+        await service.signIn("google", "code-1", "state-1").catch(() => null);
+
+        const text = logged();
+        expect(text).not.toContain("code-1");
+        expect(text).not.toContain("google-secret");
+        expect(text).not.toContain("leaked-detail");
+        expect(text).not.toContain("Bad code");
+      });
+
+      it("오류 종류가 알 수 없는 형태면 unknown으로 남긴다", async () => {
+        fetchMock.mockResolvedValueOnce(
+          json({ error: "has space and leaked-detail" }, false),
+        );
+
+        await service.signIn("google", "code-1", "state-1").catch(() => null);
+
+        const text = logged();
+        expect(text).toContain("unknown");
+        expect(text).not.toContain("leaked-detail");
+      });
     });
   });
 });

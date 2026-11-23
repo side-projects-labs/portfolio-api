@@ -33,9 +33,44 @@ const providerConfig = (provider: AdminOAuthProvider): ProviderConfig => {
   };
 };
 
+/** 공급자가 200이 아닌 응답을 준 경우입니다. 응답 원문은 담지 않고 상태와 오류 종류만 가집니다. */
+class ProviderResponseError extends Error {
+  constructor(
+    readonly status: number,
+    readonly kind: string,
+  ) {
+    super(`provider responded with ${status}`);
+  }
+}
+
+const SAFE_ERROR_KIND = /^[A-Za-z_]{1,64}$/;
+
+/** 오류 본문에서 `invalid_grant`나 `INVALID_ARGUMENT` 같은 종류만 꺼냅니다. 그 밖의 값은 unknown입니다. */
+const errorKindOf = async (response: Response): Promise<string> => {
+  try {
+    const { error } = (await response.json()) as {
+      error?: unknown;
+    };
+    const kind =
+      typeof error === "string"
+        ? error
+        : (error as { status?: unknown } | null)?.status;
+    return typeof kind === "string" && SAFE_ERROR_KIND.test(kind)
+      ? kind
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+};
+
 const fetchJson = async (url: string, init: RequestInit): Promise<unknown> => {
   const response = await fetch(url, init);
-  if (!response.ok) throw new AdminOAuthError("AUTH_FAILED");
+  if (!response.ok) {
+    throw new ProviderResponseError(
+      response.status,
+      await errorKindOf(response),
+    );
+  }
   return response.json();
 };
 
@@ -61,13 +96,14 @@ const verifiedEmail: Record<
       await fetchJson("https://oauth2.googleapis.com/token", {
         method: "POST",
         headers: { accept: "application/json" },
+        // 문자열로 바꾸면 Content-Type이 text/plain이 되어 Google이 거절하므로 객체 그대로 넘깁니다
         body: new URLSearchParams({
           code,
           client_id: config.clientId,
           client_secret: config.clientSecret,
           redirect_uri: config.redirectUri,
           grant_type: "authorization_code",
-        }).toString(),
+        }),
       }),
     );
     const profile = (await fetchJson(
@@ -180,7 +216,11 @@ export class AdminOAuthService {
       await this.markFailed(history.id);
       if (error instanceof AdminOAuthError) throw error;
       // 공급자·네트워크 오류 원문에는 토큰이 섞일 수 있어 종류만 기록하고 코드로 바꿉니다
-      this.logger.warn(`관리자 OAuth 실패 provider=${provider}`);
+      this.logger.warn(
+        error instanceof ProviderResponseError
+          ? `관리자 OAuth 실패 provider=${provider} status=${error.status} error=${error.kind}`
+          : `관리자 OAuth 실패 provider=${provider}`,
+      );
       throw new AdminOAuthError("AUTH_FAILED");
     }
   }
